@@ -1,0 +1,45 @@
+[project]
+name = "loandoc-api"
+version = "0.1.0"
+description = "LoanDoc AI backend: document ingestion, classification and field extraction"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0,<0.116.0",
+    "uvicorn[standard]>=0.32.0,<0.33.0",
+    "pydantic>=2.9.0,<3.0.0",
+    "pydantic-settings>=2.6.0,<3.0.0",
+    "python-multipart>=0.0.18,<0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0,<9.0.0",
+    "httpx>=0.27.0,<0.29.0",
+    "ruff>=0.8.0,<0.9.0",
+    "mypy>=1.13.0,<2.0.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Chosen to mirror the strictness of the TypeScript side: pyflakes, pycodestyle,
+# isort, bugbear, comprehensions, pyupgrade and pep8-naming.
+select = ["E", "F", "I", "B", "C4", "UP", "N", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+plugins = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

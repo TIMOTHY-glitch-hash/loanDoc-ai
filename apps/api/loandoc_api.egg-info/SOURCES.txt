@@ -1,0 +1,16 @@
+pyproject.toml
+app/__init__.py
+app/config.py
+app/main.py
+app/schemas.py
+app/routers/__init__.py
+app/routers/documents.py
+app/routers/health.py
+app/services/__init__.py
+app/services/pipeline.py
+loandoc_api.egg-info/PKG-INFO
+loandoc_api.egg-info/SOURCES.txt
+loandoc_api.egg-info/dependency_links.txt
+loandoc_api.egg-info/requires.txt
+loandoc_api.egg-info/top_level.txt
+tests/test_api.py

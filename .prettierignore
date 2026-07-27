@@ -1,0 +1,7 @@
+pnpm-lock.yaml
+node_modules
+.next
+dist
+.venv
+__pycache__
+*.md
