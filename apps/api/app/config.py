@@ -22,6 +22,16 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
+    #: Any OpenAI-compatible gateway (OpenRouter, Together, a local vLLM). Empty
+    #: means OpenAI directly. Keeping this configurable rather than hardcoding a
+    #: provider is what lets the same code run on a free tier and on production
+    #: GPT-4o without a branch.
+    openai_base_url: str = ""
+    #: How structured output is requested. OpenAI honours ``function_calling``;
+    #: most open models served through a gateway only honour ``json_schema``.
+    llm_structured_output_method: Literal["function_calling", "json_schema", "json_mode"] = (
+        "function_calling"
+    )
     #: Per-request provider timeout. Long enough for a dense page, short enough
     #: that one stuck call does not hold an upload open.
     openai_timeout_seconds: float = Field(default=60.0, gt=0)

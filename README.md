@@ -27,7 +27,7 @@ flowchart TB
         R["Routers<br/>health · documents · extract · evaluate · generate-memo"]
         P["DocumentPipeline"]
         PE["PolicyEngine<br/>deterministic · versioned rules"]
-        MG["MemoGenerator<br/>GPT-4o · explains the decision"]
+        MG["MemoGenerator<br/>explains the decision, never makes it"]
         C["Settings<br/>pydantic-settings"]
     end
 
@@ -43,7 +43,7 @@ flowchart TB
         CF["queries + mutations<br/>append-only auditLogs"]
     end
 
-    LLM["LLM provider<br/>(optional — stub when unset)"]
+    LLM["LLM provider<br/>OpenAI or any OpenAI-compatible gateway<br/>(optional — stub when unset)"]
 
     UI -->|"useQuery / useMutation<br/>live subscriptions"| CF
     CF --> CS
@@ -140,6 +140,9 @@ These are the points worth being able to defend in an interview.
 | **The model is handed a brief, not the raw payloads** | `memo/brief.py` renders every figure once, in banking conventions, and is declared as the only permitted source of numbers — so anything cited outside it is visibly invented. Figures that were not captured are stated as *not evidenced*: absence omitted is absence the model fills in. |
 | **Tone is validated, not merely requested** | Prompt instructions are a request; `MemoSections` validators are a guarantee. Conversational filler ("Sure!", "let me know") fails validation, and asking for five named sections means the required structure is enforced by the parser instead of hoped for. |
 | **Memo persistence runs through a Convex mutation** | The patch and its `DECISION_MEMO_GENERATED` audit entry commit in one Convex transaction, and the row stores `SEVERITY:RULE_ID` references rather than rendered messages so text can be re-rendered from the policy version without a migration. Convex returns `200` with `{"status":"error"}` for a failed mutation, which the client checks explicitly. |
+| **The provider is configuration, not code** | Both callers build their model through `app/llm.py`, so a `base_url` switch runs the whole pipeline on a free OpenRouter model or a local vLLM with no change to the agents — and no provider SDK beyond the OpenAI-compatible one. How structured output is requested is configuration too: OpenAI honours tool calling, most gateway-hosted open models only honour a JSON-schema response format, and that is a deployment fact rather than an assumption worth hardcoding. |
+| **The schema advertised to the model avoids lookaround regex** | Pydantic's stock `Decimal` schema carries `^(?!^[-+.]*$)…`, and constrained-decoding backends reject lookaround outright — the request fails with *"Unsupported structured output regex"* before the model runs. `LlmDecimal` advertises a string and parses to an exact `Decimal`, keeping money off binary floats while staying portable. |
+| **Model figures are normalised, not rejected** | A model writes `"$102,480.00"` however firmly the prompt says otherwise. Refusing that value discards a correctly-read page over its punctuation, so grouping/currency characters (and accounting negatives, `(1,200.00)` ⇒ `-1200.00`) are stripped before parsing — while genuine nonsense still fails validation. |
 | **`/api/v1/extract` returns 503 without a provider key** | The stub path exists for the demo pipeline; an extraction endpoint that fabricates fields would be worse than an honest outage. |
 | **Convex for application state, FastAPI for document processing** | Convex gives the review queue live subscriptions with no polling or cache invalidation, which is what an underwriting dashboard needs; heavy/blocking extraction stays in Python where the ML tooling lives. |
 | **Append-only `auditLogs` + `policyVersion` on every entry** | There is no update or delete mutation for audit rows, and each one records the policy version in force, so a past decision can be replayed exactly rather than reinterpreted under today's rules. |
@@ -210,11 +213,29 @@ client bundle. Never put a secret here.
 | `API_ENV`, `API_VERSION` | Environment name and reported version |
 | `CORS_ORIGINS` | Comma-separated allowed browser origins (never `*`) |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | Provider credentials; empty key ⇒ stub mode (and `/extract` returns 503) |
+| `OPENAI_BASE_URL` | Any OpenAI-compatible gateway (OpenRouter, a local vLLM); empty ⇒ OpenAI |
+| `LLM_STRUCTURED_OUTPUT_METHOD` | `function_calling` (OpenAI) / `json_schema` (gateway-hosted open models) / `json_mode` |
 | `OPENAI_TIMEOUT_SECONDS`, `OPENAI_MAX_RETRIES` | Per-page provider call budget |
 | `EXTRACTION_PAGE_CONCURRENCY` | Parallel per-page LLM calls |
 | `EXTRACTION_MAX_PAGES` | Page ceiling, checked before any tokens are spent |
 | `REVIEW_CONFIDENCE_THRESHOLD` | Below this, a field is routed to human review |
 | `MAX_UPLOAD_BYTES` | Upload size limit enforced before any processing |
+
+#### Running on free models
+
+The pipeline was verified end-to-end against OpenRouter's free tier, no OpenAI account:
+
+```dotenv
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=<openrouter key>
+OPENAI_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+LLM_STRUCTURED_OUTPUT_METHOD=json_schema
+```
+
+Pick a free model that lists `structured_outputs` support — without it the model returns
+prose and the request fails the schema contract. Free endpoints are also shared, so a
+`429` ("temporarily rate-limited upstream") is normal and surfaces as a `503`, not a
+fabricated result.
 
 ---
 
@@ -229,7 +250,7 @@ client bundle. Never put a secret here.
 | `POST` | `/api/v1/extract` | Multipart PDF upload → LLM field extraction with per-field confidence and evidence |
 | `POST` | `/api/v1/evaluate` | Deterministic policy evaluation → flags, risk score, recommended action |
 | `GET` | `/api/v1/policies` | Published policy versions and their rules |
-| `POST` | `/api/v1/generate-memo` | GPT-4o underwriting memo from extraction + evaluation, persisted to Convex |
+| `POST` | `/api/v1/generate-memo` | LLM underwriting memo from extraction + evaluation, persisted to Convex |
 
 Interactive OpenAPI docs: <http://localhost:8000/docs>.
 
