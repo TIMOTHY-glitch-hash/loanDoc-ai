@@ -24,9 +24,10 @@ flowchart TB
     end
 
     subgraph api["apps/api — FastAPI"]
-        R["Routers<br/>health · documents · extract · evaluate"]
+        R["Routers<br/>health · documents · extract · evaluate · generate-memo"]
         P["DocumentPipeline"]
         PE["PolicyEngine<br/>deterministic · versioned rules"]
+        MG["MemoGenerator<br/>GPT-4o · explains the decision"]
         C["Settings<br/>pydantic-settings"]
     end
 
@@ -51,6 +52,9 @@ flowchart TB
     T -.->|"mirrored by app/schemas.py"| R
     R --> P
     R --> PE
+    R --> MG
+    PE -.->|"recorded evaluation"| MG
+    MG -->|"saveDecisionMemo mutation"| CF
     C --> P
     P --> S1 --> S2 --> S3 --> S4
     S2 -.->|"seam: _extract()"| LLM
@@ -97,6 +101,7 @@ loandoc-ai/
 │   └── api/                 # FastAPI backend
 │       ├── app/agents/      # LangChain extraction agent (extractor, pii, prompts)
 │       ├── app/policy/      # Deterministic PolicyEngine + versioned rule registry
+│       ├── app/memo/        # MemoGenerator (brief, prompts, Convex persistence)
 │       ├── app/routers/     # HTTP layer only
 │       ├── app/services/    # Pipeline logic (no framework imports)
 │       ├── app/schemas.py   # Wire models, camelCase aliases
@@ -131,6 +136,10 @@ These are the points worth being able to defend in an interview.
 | **Policy versions are immutable and append-only** | Rules are `frozen=True` and a change means publishing a new `PolicyVersion`, so an evaluation recorded in January still replays under January's thresholds. Each result carries a SHA-256 `policyChecksum` (proves the rules were not edited) and an `inputFingerprint` (proves a replay is a replay). |
 | **Rules compare *facts*, and facts are derived in one place** | `dti`, `ltv` and `incomeToLoanRatio` are computed in `policy/facts.py` with `Decimal`, so a rule stays a plain comparison publishable as data — and "how was DTI calculated?" has exactly one answer. A rule naming an unknown fact fails at import: a check that looks present and does nothing is the worst outcome available. |
 | **Missing data is INFO, weighs 0, and still blocks AUTO_APPROVE** | Absent income is not zero income. An information gap must not read as evidence of risk, but it can never be auto-approved either. |
+| **The memo is generated *from* a recorded decision, never instead of one** | Order is `extract (LLM) → evaluate (deterministic) → generate-memo (LLM)`. The memo explains a decision the rules engine already made, and prose that contradicts the recommended action is rejected with a `502` rather than stored — a memo reading "approval is recommended" over a `DECLINE` is worse than no memo. |
+| **The model is handed a brief, not the raw payloads** | `memo/brief.py` renders every figure once, in banking conventions, and is declared as the only permitted source of numbers — so anything cited outside it is visibly invented. Figures that were not captured are stated as *not evidenced*: absence omitted is absence the model fills in. |
+| **Tone is validated, not merely requested** | Prompt instructions are a request; `MemoSections` validators are a guarantee. Conversational filler ("Sure!", "let me know") fails validation, and asking for five named sections means the required structure is enforced by the parser instead of hoped for. |
+| **Memo persistence runs through a Convex mutation** | The patch and its `DECISION_MEMO_GENERATED` audit entry commit in one Convex transaction, and the row stores `SEVERITY:RULE_ID` references rather than rendered messages so text can be re-rendered from the policy version without a migration. Convex returns `200` with `{"status":"error"}` for a failed mutation, which the client checks explicitly. |
 | **`/api/v1/extract` returns 503 without a provider key** | The stub path exists for the demo pipeline; an extraction endpoint that fabricates fields would be worse than an honest outage. |
 | **Convex for application state, FastAPI for document processing** | Convex gives the review queue live subscriptions with no polling or cache invalidation, which is what an underwriting dashboard needs; heavy/blocking extraction stays in Python where the ML tooling lives. |
 | **Append-only `auditLogs` + `policyVersion` on every entry** | There is no update or delete mutation for audit rows, and each one records the policy version in force, so a past decision can be replayed exactly rather than reinterpreted under today's rules. |
@@ -220,6 +229,7 @@ client bundle. Never put a secret here.
 | `POST` | `/api/v1/extract` | Multipart PDF upload → LLM field extraction with per-field confidence and evidence |
 | `POST` | `/api/v1/evaluate` | Deterministic policy evaluation → flags, risk score, recommended action |
 | `GET` | `/api/v1/policies` | Published policy versions and their rules |
+| `POST` | `/api/v1/generate-memo` | GPT-4o underwriting memo from extraction + evaluation, persisted to Convex |
 
 Interactive OpenAPI docs: <http://localhost:8000/docs>.
 
@@ -246,6 +256,28 @@ curl -F file=@w2.pdf -F applicationId=app_123 http://localhost:8000/api/v1/extra
   "warnings": []
 }
 ```
+
+### Underwriting memo
+
+```bash
+curl -X POST localhost:8000/api/v1/generate-memo -H 'content-type: application/json' -d '{
+  "applicationId": "<convex id>",
+  "extractedData": { "annualIncome": "180000", "monthlyDebtPayments": "2000",
+                     "creditScore": 760, "employmentStatus": "fullTime" },
+  "loanRequest": { "loanAmount": "50000", "propertyValue": "400000" },
+  "policyEvaluation": { /* the response from /api/v1/evaluate, unmodified */ }
+}'
+```
+
+Returns the five required sections (Executive Summary, Financial Profile, Risk Factors,
+Recommendation, Conditions) plus a `markdown` rendering, the policy version/checksum the
+memo describes, and `persisted`. `POST` it the evaluation you actually recorded — it is not
+recomputed, so the memo provably describes the decision that was taken.
+
+Status codes: `503` no `OPENAI_API_KEY` (set `allowTemplateFallback: true` to opt into a
+deterministic, self-declaring template instead), `502` model output failed the tone or
+consistency contract, `422` malformed input. A Convex write failure is a warning on a `200`,
+not a lost memo.
 
 ### Policy engine and audit trail
 
