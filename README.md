@@ -24,8 +24,9 @@ flowchart TB
     end
 
     subgraph api["apps/api — FastAPI"]
-        R["Routers<br/>/api/v1/health · /api/v1/documents · /api/v1/extract"]
+        R["Routers<br/>health · documents · extract · evaluate"]
         P["DocumentPipeline"]
+        PE["PolicyEngine<br/>deterministic · versioned rules"]
         C["Settings<br/>pydantic-settings"]
     end
 
@@ -49,10 +50,12 @@ flowchart TB
     T -.->|"compile-time contract"| UI
     T -.->|"mirrored by app/schemas.py"| R
     R --> P
+    R --> PE
     C --> P
     P --> S1 --> S2 --> S3 --> S4
     S2 -.->|"seam: _extract()"| LLM
     S4 -->|"ProcessDocumentResponse"| UI
+    PE -->|"flags · riskScore · recommendedAction<br/>+ policyChecksum · inputFingerprint"| UI
 ```
 
 ### Request lifecycle
@@ -93,6 +96,7 @@ loandoc-ai/
 │   │   └── src/lib/         # env parsing + typed API client
 │   └── api/                 # FastAPI backend
 │       ├── app/agents/      # LangChain extraction agent (extractor, pii, prompts)
+│       ├── app/policy/      # Deterministic PolicyEngine + versioned rule registry
 │       ├── app/routers/     # HTTP layer only
 │       ├── app/services/    # Pipeline logic (no framework imports)
 │       ├── app/schemas.py   # Wire models, camelCase aliases
@@ -123,6 +127,10 @@ These are the points worth being able to defend in an interview.
 | **One LLM call per PDF page, merged in Python** | A 40-page bank statement will not fit one prompt, and per-page calls mean a single bad page degrades one page instead of the document. Merging is deterministic code (highest confidence wins), so the result is reproducible and explainable rather than a second model's opinion. |
 | **Every extracted field is optional in the LLM schema** | Forcing the model to emit a property value for a pay stub is how hallucinations get invited. "Absent" and "low confidence" are different signals and are treated differently. |
 | **PII scanned before evidence is returned; snippets redacted** | The model happily quotes an SSN back inside its own evidence. Detection runs on the source text, findings carry only masked samples, and every returned snippet is redacted - so the audit trail cannot become the leak. |
+| **Decisions are made by deterministic rules, never by the LLM** | The model's job ends at extraction. `PolicyEngine` has no clock, no randomness, no I/O and no floats, so same inputs + same policy version = byte-identical output. "Why was this declined?" is answered by reading code and a rule table, not by re-prompting a model. |
+| **Policy versions are immutable and append-only** | Rules are `frozen=True` and a change means publishing a new `PolicyVersion`, so an evaluation recorded in January still replays under January's thresholds. Each result carries a SHA-256 `policyChecksum` (proves the rules were not edited) and an `inputFingerprint` (proves a replay is a replay). |
+| **Rules compare *facts*, and facts are derived in one place** | `dti`, `ltv` and `incomeToLoanRatio` are computed in `policy/facts.py` with `Decimal`, so a rule stays a plain comparison publishable as data — and "how was DTI calculated?" has exactly one answer. A rule naming an unknown fact fails at import: a check that looks present and does nothing is the worst outcome available. |
+| **Missing data is INFO, weighs 0, and still blocks AUTO_APPROVE** | Absent income is not zero income. An information gap must not read as evidence of risk, but it can never be auto-approved either. |
 | **`/api/v1/extract` returns 503 without a provider key** | The stub path exists for the demo pipeline; an extraction endpoint that fabricates fields would be worse than an honest outage. |
 | **Convex for application state, FastAPI for document processing** | Convex gives the review queue live subscriptions with no polling or cache invalidation, which is what an underwriting dashboard needs; heavy/blocking extraction stays in Python where the ML tooling lives. |
 | **Append-only `auditLogs` + `policyVersion` on every entry** | There is no update or delete mutation for audit rows, and each one records the policy version in force, so a past decision can be replayed exactly rather than reinterpreted under today's rules. |
@@ -210,6 +218,8 @@ client bundle. Never put a secret here.
 | `POST` | `/api/v1/documents?applicationId=…` | Upload a document and run the pipeline |
 | `GET` | `/api/v1/documents/{id}` | Fetch a single document |
 | `POST` | `/api/v1/extract` | Multipart PDF upload → LLM field extraction with per-field confidence and evidence |
+| `POST` | `/api/v1/evaluate` | Deterministic policy evaluation → flags, risk score, recommended action |
+| `GET` | `/api/v1/policies` | Published policy versions and their rules |
 
 Interactive OpenAPI docs: <http://localhost:8000/docs>.
 
@@ -236,6 +246,48 @@ curl -F file=@w2.pdf -F applicationId=app_123 http://localhost:8000/api/v1/extra
   "warnings": []
 }
 ```
+
+### Policy engine and audit trail
+
+```bash
+curl -X POST localhost:8000/api/v1/evaluate -H 'content-type: application/json' -d '{
+  "extractedData": { "annualIncome": "60000", "monthlyDebtPayments": "2500",
+                     "creditScore": 590, "employmentStatus": "selfEmployed" },
+  "loanRequest": { "loanAmount": "390000", "propertyValue": "400000" }
+}'
+```
+
+```jsonc
+{
+  "passed": false,
+  "overallRiskScore": 100,             // severity-weighted, clamped
+  "recommendedAction": "DECLINE",      // any CRITICAL -> DECLINE
+  "flags": [{ "ruleId": "DTI_LIMIT", "severity": "CRITICAL", "observedValue": "50.0%",
+              "threshold": "43.0%", "operator": "GT",
+              "message": "Debt-to-income ratio 50.0% exceeds the 43.0% limit." }],
+  "facts": { "dti": "50.0%", "ltv": "97.5%", "incomeToLoanRatio": "0.15" },
+  "missingFacts": [],
+  "policyVersion": "2025.07.1",
+  "policyChecksum": "…",               // SHA-256 of the rule set
+  "inputFingerprint": "…"              // SHA-256 of the inputs
+}
+```
+
+Active rules (`2025.07.1`):
+
+| Rule | Condition | Severity |
+| --- | --- | --- |
+| `DTI_LIMIT` | `dti > 43%` | CRITICAL |
+| `CREDIT_SCORE_FLOOR` | `creditScore < 620` | CRITICAL |
+| `INCOME_COVERAGE` | `incomeToLoanRatio < 3` | WARNING |
+| `EMPLOYMENT_STABILITY` | `employmentStatus` does not contain "full" | WARNING |
+| `HIGH_LTV` | `ltv > 90%` | WARNING |
+
+Replaying a historical decision is the same request with `"policyVersion": "2025.01.0"`
+pinned — that policy's 50% DTI ceiling still applies, and its different
+`policyChecksum` proves which rule set was in force. `GET /api/v1/policies` lists every
+published version with its rules and rationales. An unknown version is a `422`, never a
+silent fallback to the active policy.
 
 Status codes: `415` non-PDF, `422` corrupt / encrypted / no text layer (needs OCR),
 `413` too large, `503` provider unavailable or unconfigured. A page that fails at the
