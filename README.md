@@ -36,8 +36,15 @@ flowchart TB
         S4["4. Route<br/>verified / needs_review"]
     end
 
+    subgraph convex["apps/web/convex — Convex"]
+        CS["schema.ts<br/>users · loanApplications · documents<br/>auditLogs · policies"]
+        CF["queries + mutations<br/>append-only auditLogs"]
+    end
+
     LLM["LLM provider<br/>(optional — stub when unset)"]
 
+    UI -->|"useQuery / useMutation<br/>live subscriptions"| CF
+    CF --> CS
     UI -->|"typed fetch + Zod parse"| R
     T -.->|"compile-time contract"| UI
     T -.->|"mirrored by app/schemas.py"| R
@@ -79,8 +86,10 @@ sequenceDiagram
 loandoc-ai/
 ├── apps/
 │   ├── web/                 # Next.js (App Router, TS strict, Tailwind v4, shadcn/ui)
+│   │   ├── convex/          # Convex schema, queries/mutations, seed script
 │   │   ├── src/app/         # Routes + layout
-│   │   ├── src/components/  # shadcn/ui primitives
+│   │   ├── src/components/  # shadcn/ui primitives + ConvexProvider
+│   │   ├── src/hooks/       # Typed useQuery/useMutation wrappers
 │   │   └── src/lib/         # env parsing + typed API client
 │   └── api/                 # FastAPI backend
 │       ├── app/routers/     # HTTP layer only
@@ -110,6 +119,9 @@ These are the points worth being able to defend in an interview.
 | **Provenance on every field** | Page + bounding box means any extracted value can be linked back to the pixels it came from — the audit trail a lender needs. |
 | **Pipeline in `services/`, not in the router** | The pipeline has zero FastAPI imports, so it is unit-testable without HTTP and reusable from a worker/queue later. |
 | **Table-driven extraction (`_EXPECTED_FIELDS`)** | Adding a document type is a data change, not a code change. |
+| **Convex for application state, FastAPI for document processing** | Convex gives the review queue live subscriptions with no polling or cache invalidation, which is what an underwriting dashboard needs; heavy/blocking extraction stays in Python where the ML tooling lives. |
+| **Append-only `auditLogs` + `policyVersion` on every entry** | There is no update or delete mutation for audit rows, and each one records the policy version in force, so a past decision can be replayed exactly rather than reinterpreted under today's rules. |
+| **Explicit `createdAt`/`updatedAt` despite Convex's `_creationTime`** | `updatedAt` has no built-in equivalent, and an audit trail should not depend on a system field whose semantics we do not control. |
 | **In-memory document store** | Deliberate: the scaffold demonstrates the contract and pipeline without committing to a database. Swapping in SQLAlchemy replaces one dict behind three calls. |
 | **Strict TS + extra flags** | `noUncheckedIndexedAccess`, `noUnusedLocals`, `exactOptionalPropertyTypes` catch the class of bugs plain `strict` misses. Ruff + `mypy --strict` are the Python equivalents. |
 
@@ -125,6 +137,8 @@ Prerequisites: **Node ≥ 20.11**, **pnpm 9**, **Python ≥ 3.10**.
 pnpm install
 cp apps/web/.env.example apps/web/.env.local
 pnpm --filter @loandoc/types build   # emits dist/ consumed by the web app
+pnpm --filter web convex:dev         # provisions the Convex dev deployment, regenerates convex/_generated
+pnpm --filter web convex:seed        # 5 synthetic loan applications (faker, fixed seed)
 pnpm dev                             # http://localhost:3000
 ```
 
