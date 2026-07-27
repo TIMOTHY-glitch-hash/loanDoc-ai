@@ -1,0 +1,23 @@
+{
+  "name": "loandoc-ai",
+  "private": true,
+  "version": "0.1.0",
+  "description": "LoanDoc AI - agentic document processing for banking loan underwriting",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter @loandoc/types build && pnpm --filter web build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "api:dev": "cd apps/api && uvicorn app.main:app --reload --port 8000"
+  },
+  "devDependencies": {
+    "prettier": "3.4.2",
+    "prettier-plugin-tailwindcss": "0.6.9"
+  }
+}

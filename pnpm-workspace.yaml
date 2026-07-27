@@ -1,0 +1,6 @@
+# pnpm workspaces keep the Next.js app, the FastAPI-adjacent tooling and the
+# shared TypeScript packages in a single install graph, so `@loandoc/types`
+# can be consumed by the web app without publishing to a registry.
+packages:
+  - 'apps/*'
+  - 'packages/*'
