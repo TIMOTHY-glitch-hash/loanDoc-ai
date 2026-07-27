@@ -15,7 +15,7 @@ import time
 from typing import Protocol, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.memo.brief import build_brief
@@ -229,16 +229,13 @@ class MemoGenerator:
 
         # Imported lazily so the module (and the rest of the API) loads without the
         # provider SDK present or configured.
-        from langchain_openai import ChatOpenAI
+        from app.llm import build_chat_model, structured_output_kwargs
 
-        model = ChatOpenAI(
-            model=self._settings.openai_model,
-            # Slightly above zero: readable prose, still tightly constrained by the
-            # brief and the tone validators.
-            temperature=self._settings.memo_temperature,
-            timeout=self._settings.openai_timeout_seconds,
-            max_retries=self._settings.openai_max_retries,
-            api_key=SecretStr(self._settings.openai_api_key),
+        # Slightly above zero: readable prose, still tightly constrained by the
+        # brief and the tone validators.
+        model = build_chat_model(self._settings, temperature=self._settings.memo_temperature)
+        self._llm = cast(
+            MemoLlm,
+            model.with_structured_output(MemoSections, **structured_output_kwargs(self._settings)),
         )
-        self._llm = cast(MemoLlm, model.with_structured_output(MemoSections))
         return self._llm

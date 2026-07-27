@@ -12,12 +12,45 @@ Two families of models live here:
 
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, WithJsonSchema
 from pydantic.alias_generators import to_camel
 
 from app.schemas import CamelModel
+
+#: A ``Decimal`` field, but advertised to the provider as a plain string.
+#:
+#: Pydantic's own JSON schema for ``Decimal`` carries a regex with a lookahead
+#: (``^(?!^[-+.]*$)...``), and constrained-decoding backends behind OpenAI-compatible
+#: gateways reject lookaround outright - the request fails with "Unsupported
+#: structured output regex" before the model ever runs. Dropping to a plain string
+#: in the *advertised* schema keeps structured output portable while validation
+#: still parses the figure into an exact ``Decimal``.
+
+
+def _normalise_number(value: object) -> object:
+    """Strip grouping and currency characters before decimal parsing.
+
+    Models emit "$102,480.00" no matter how firmly the prompt says not to, and
+    rejecting a correctly-read figure over its punctuation throws away a whole
+    page of extraction. Only grouping/currency characters are removed, so genuine
+    nonsense still fails validation.
+    """
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "").replace("$", "").replace("\u00a0", "")
+        # Accounting negatives: "(1,200.00)" means -1200.00.
+        if cleaned.startswith("(") and cleaned.endswith(")"):
+            cleaned = f"-{cleaned[1:-1]}"
+        return cleaned
+    return value
+
+
+LlmDecimal = Annotated[
+    Decimal,
+    BeforeValidator(_normalise_number),
+    WithJsonSchema({"type": "string", "description": 'A number, e.g. "84500.00".'}),
+]
 
 #: Truncation limit for evidence snippets. Long enough to prove where a value
 #: came from, short enough that we are not echoing whole pages of PII back.
@@ -71,10 +104,10 @@ class NumericEvidence(LlmModel):
     """Same contract as :class:`TextEvidence` for monetary/numeric fields.
 
     The value is a ``Decimal`` because loan amounts must not be subject to binary
-    float rounding; Pydantic parses "84,500.00" style strings into it.
+    float rounding; ``LlmDecimal`` normalises "$84,500.00" style output into one.
     """
 
-    value: Decimal = Field(description="The numeric value, without currency symbols or commas.")
+    value: LlmDecimal = Field(description="The numeric value, without currency symbols or commas.")
     confidence: float = Field(ge=0.0, le=1.0, description="How certain you are, 0-1.")
     raw_text: str = Field(description="The exact line from the page containing this value.")
 
