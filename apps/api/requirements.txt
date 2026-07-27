@@ -8,3 +8,4 @@ python-multipart==0.0.20
 langchain==0.3.30
 langchain-openai==0.3.35
 pypdf==5.9.0
+httpx==0.28.1

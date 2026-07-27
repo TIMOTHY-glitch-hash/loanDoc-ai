@@ -127,6 +127,50 @@ export const setStatus = mutation({
   },
 });
 
+/**
+ * Persists a generated underwriting memo.
+ *
+ * Called over Convex's HTTP mutation API by the FastAPI `/generate-memo`
+ * endpoint, which is why the arguments are primitives rather than a Doc patch.
+ * The memo is written together with the policy version and risk score it was
+ * written from: a memo detached from the rules that produced it is a narrative,
+ * not a decision record.
+ */
+export const saveDecisionMemo = mutation({
+  args: {
+    id: v.id('loanApplications'),
+    decisionMemo: v.string(),
+    policyVersion: v.string(),
+    riskFlags: v.optional(v.array(v.string())),
+    agentConfidenceScore: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const application = await ctx.db.get(args.id);
+    if (application === null) throw new Error(`Application ${args.id} not found`);
+
+    await ctx.db.patch(
+      args.id,
+      touch({
+        decisionMemo: args.decisionMemo,
+        ...(args.riskFlags === undefined ? {} : { riskFlags: args.riskFlags }),
+        ...(args.agentConfidenceScore === undefined
+          ? {}
+          : { agentConfidenceScore: args.agentConfidenceScore }),
+      }),
+    );
+
+    await recordAudit(ctx, {
+      applicationId: args.id,
+      action: 'DECISION_MEMO_GENERATED',
+      actor: 'AGENT',
+      details: {
+        policyVersion: args.policyVersion,
+        characters: args.decisionMemo.length,
+      },
+    });
+  },
+});
+
 /** Written by the agent after processing a document bundle. */
 export const applyAgentAssessment = mutation({
   args: {

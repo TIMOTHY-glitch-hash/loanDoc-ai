@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     extraction_page_concurrency: int = Field(default=5, ge=1, le=50)
     extraction_max_pages: int = Field(default=40, ge=1)
 
+    #: Memo prose only. Above zero so the language reads naturally; the figures
+    #: come from a deterministic brief, so this cannot move a number.
+    memo_temperature: float = Field(default=0.2, ge=0.0, le=1.0)
+
+    #: Convex deployment URL, e.g. https://<slug>.convex.cloud. Empty means memo
+    #: persistence is skipped and reported rather than silently failing.
+    convex_url: str = ""
+    convex_timeout_seconds: float = Field(default=10.0, gt=0)
+
     review_confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
 
