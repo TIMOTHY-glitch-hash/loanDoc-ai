@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import documents, health
+from app.routers import documents, extract, health
 
 #: Versioned prefix from day one - the frontend pins to it, so a v2 can ship
 #: alongside v1 instead of breaking deployed clients.
@@ -40,6 +40,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router, prefix=API_PREFIX)
     app.include_router(documents.router, prefix=API_PREFIX)
+    app.include_router(extract.router, prefix=API_PREFIX)
     return app
 
 
