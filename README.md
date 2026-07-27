@@ -24,7 +24,7 @@ flowchart TB
     end
 
     subgraph api["apps/api — FastAPI"]
-        R["Routers<br/>/api/v1/health · /api/v1/documents"]
+        R["Routers<br/>/api/v1/health · /api/v1/documents · /api/v1/extract"]
         P["DocumentPipeline"]
         C["Settings<br/>pydantic-settings"]
     end
@@ -92,6 +92,7 @@ loandoc-ai/
 │   │   ├── src/hooks/       # Typed useQuery/useMutation wrappers
 │   │   └── src/lib/         # env parsing + typed API client
 │   └── api/                 # FastAPI backend
+│       ├── app/agents/      # LangChain extraction agent (extractor, pii, prompts)
 │       ├── app/routers/     # HTTP layer only
 │       ├── app/services/    # Pipeline logic (no framework imports)
 │       ├── app/schemas.py   # Wire models, camelCase aliases
@@ -119,6 +120,10 @@ These are the points worth being able to defend in an interview.
 | **Provenance on every field** | Page + bounding box means any extracted value can be linked back to the pixels it came from — the audit trail a lender needs. |
 | **Pipeline in `services/`, not in the router** | The pipeline has zero FastAPI imports, so it is unit-testable without HTTP and reusable from a worker/queue later. |
 | **Table-driven extraction (`_EXPECTED_FIELDS`)** | Adding a document type is a data change, not a code change. |
+| **One LLM call per PDF page, merged in Python** | A 40-page bank statement will not fit one prompt, and per-page calls mean a single bad page degrades one page instead of the document. Merging is deterministic code (highest confidence wins), so the result is reproducible and explainable rather than a second model's opinion. |
+| **Every extracted field is optional in the LLM schema** | Forcing the model to emit a property value for a pay stub is how hallucinations get invited. "Absent" and "low confidence" are different signals and are treated differently. |
+| **PII scanned before evidence is returned; snippets redacted** | The model happily quotes an SSN back inside its own evidence. Detection runs on the source text, findings carry only masked samples, and every returned snippet is redacted - so the audit trail cannot become the leak. |
+| **`/api/v1/extract` returns 503 without a provider key** | The stub path exists for the demo pipeline; an extraction endpoint that fabricates fields would be worse than an honest outage. |
 | **Convex for application state, FastAPI for document processing** | Convex gives the review queue live subscriptions with no polling or cache invalidation, which is what an underwriting dashboard needs; heavy/blocking extraction stays in Python where the ML tooling lives. |
 | **Append-only `auditLogs` + `policyVersion` on every entry** | There is no update or delete mutation for audit rows, and each one records the policy version in force, so a past decision can be replayed exactly rather than reinterpreted under today's rules. |
 | **Explicit `createdAt`/`updatedAt` despite Convex's `_creationTime`** | `updatedAt` has no built-in equivalent, and an audit trail should not depend on a system field whose semantics we do not control. |
@@ -187,7 +192,10 @@ client bundle. Never put a secret here.
 | --- | --- |
 | `API_ENV`, `API_VERSION` | Environment name and reported version |
 | `CORS_ORIGINS` | Comma-separated allowed browser origins (never `*`) |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | Provider credentials; empty key ⇒ stub mode |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Provider credentials; empty key ⇒ stub mode (and `/extract` returns 503) |
+| `OPENAI_TIMEOUT_SECONDS`, `OPENAI_MAX_RETRIES` | Per-page provider call budget |
+| `EXTRACTION_PAGE_CONCURRENCY` | Parallel per-page LLM calls |
+| `EXTRACTION_MAX_PAGES` | Page ceiling, checked before any tokens are spent |
 | `REVIEW_CONFIDENCE_THRESHOLD` | Below this, a field is routed to human review |
 | `MAX_UPLOAD_BYTES` | Upload size limit enforced before any processing |
 
@@ -201,8 +209,38 @@ client bundle. Never put a secret here.
 | `GET` | `/api/v1/documents?applicationId=…` | List documents for an application |
 | `POST` | `/api/v1/documents?applicationId=…` | Upload a document and run the pipeline |
 | `GET` | `/api/v1/documents/{id}` | Fetch a single document |
+| `POST` | `/api/v1/extract` | Multipart PDF upload → LLM field extraction with per-field confidence and evidence |
 
 Interactive OpenAPI docs: <http://localhost:8000/docs>.
+
+### Extraction agent
+
+```bash
+curl -F file=@w2.pdf -F applicationId=app_123 http://localhost:8000/api/v1/extract
+```
+
+```jsonc
+{
+  "documentType": "W2",              // confidence-weighted vote across pages
+  "documentTypeConfidence": 0.94,
+  "pageCount": 3,
+  "annualIncome": {
+    "value": "102000",
+    "confidence": 0.95,
+    "page": 2,
+    "rawText": "Annual income 102,000.00"   // evidence, PII-redacted
+  },
+  "piiFindings": [{ "kind": "ssn", "page": 1, "occurrences": 1, "maskedSample": "*****6789" }],
+  "privacyNotice": "Sensitive data detected (ssn) on page(s) 1. …",
+  "pages": [{ "page": 1, "status": "extracted", "detectedType": "W2" }],
+  "warnings": []
+}
+```
+
+Status codes: `415` non-PDF, `422` corrupt / encrypted / no text layer (needs OCR),
+`413` too large, `503` provider unavailable or unconfigured. A page that fails at the
+provider appears in `pages` with `status: "failed"` and does not fail the request;
+if *every* page fails, the request becomes a 503 rather than a hollow success.
 
 ---
 
